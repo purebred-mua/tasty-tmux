@@ -15,7 +15,6 @@
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 {-# LANGUAGE OverloadedStrings #-}
-
 module Test.Tasty.Tmux where
 
 import Data.List (isInfixOf)
