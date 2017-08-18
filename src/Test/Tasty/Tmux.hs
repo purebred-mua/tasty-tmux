@@ -18,18 +18,15 @@
 module Test.Tasty.Tmux where
 
 import Data.List (isInfixOf)
-import Control.Monad (forM_)
 import qualified Data.Text as T
 import System.IO.Temp (withSystemTempDirectory)
-import System.Directory (createDirectory, copyFile, listDirectory)
 import Data.Semigroup ((<>))
 import GHC.MVar (MVar)
-import Control.Concurrent (newEmptyMVar, forkIO, putMVar, takeMVar, killThread, threadDelay)
-import Control.Exception (bracket)
+import Control.Concurrent
+       (newEmptyMVar, forkIO, putMVar, takeMVar)
+import System.Timeout (timeout)
 
-import System.Process
-       (shell, callProcess, readProcess, readCreateProcess, CreateProcess(..),
-        CmdSpec(..), StdStream(..))
+import System.Process (callProcess, readProcess)
 import System.Directory (getCurrentDirectory, removeFile)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.Golden (goldenVsFile)
@@ -49,16 +46,17 @@ smokeTest = do
   withSystemTempDirectory "purebredtest" $ \fp -> do
     testmdir <- prepareMaildir fp
     cfg <- prepareNotmuchCfg fp testmdir
-    out <- prepareNotmuch cfg
-    print out
-    _ <- setUp testmdir
+    _ <- prepareNotmuch cfg
+    callProcess "tmux" (tmuxSessionArgs testmdir)
+    callProcess "tmux" (communicateSessionArgs ++ ["-l", "purebred --database " <> testmdir])
+    callProcess "tmux" (communicateSessionArgs ++ ["Enter"])
+    _ <- setUp
     callProcess "tmux" $ communicateSessionArgs ++ ["j", "j", "Enter"]
-    out <- readProcess "tmux" hardcopyArgs []
-    print out
-    callProcess "tmux" $ savebufferArgs "/tmp/testoutput"
+    readProcess "tmux" hardcopyArgs [] >>= print
+    readProcess "tmux" (savebufferArgs "/tmp/testoutput") [] >>= print
     teardown
 
-waitReady :: MVar String -> IO ()
+waitReady :: MVar (String) -> IO ()
 waitReady baton = do
     soc <- socket AF_UNIX Datagram defaultProtocol
     bind soc (SockAddrUnix "/tmp/purebred.socket")
@@ -74,23 +72,21 @@ tmuxSessionArgs :: FilePath -> [String]
 tmuxSessionArgs cfg =
     [ "new-session"
     , "-x"
-    , "95"
+    , "80"
     , "-y"
-    , "56"
+    , "24"
     , "-d"
     , "-s"
     , "purebredtest"
     , "-n"
     , "purebred"
-    , "purebred"
-    , "--database"
-    , cfg]
+    ]
 
 communicateSessionArgs :: [String]
 communicateSessionArgs = words "send-keys -t purebredtest"
 
 hardcopyArgs :: [String]
-hardcopyArgs = words "capture-pane -p -t purebredtest:purebred"
+hardcopyArgs = words "capture-pane -p -b purebredcapture -t purebredtest:purebred"
 
 savebufferArgs :: FilePath -> [String]
 savebufferArgs hardcopypath =
