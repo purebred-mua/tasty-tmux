@@ -14,23 +14,27 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Test.Tasty.Tmux where
 
-import Data.List (isInfixOf)
 import qualified Data.Text as T
-import System.IO.Temp (withSystemTempDirectory)
+import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Semigroup ((<>))
-import GHC.MVar (MVar)
 import Control.Concurrent
-       (newEmptyMVar, forkIO, putMVar, takeMVar)
+       (newEmptyMVar, putMVar, takeMVar)
 import System.Timeout (timeout)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource
-       (register, resourceForkIO, runResourceT, ResourceT)
+       (register, release, resourceForkIO, runResourceT, ResourceT, ReleaseKey)
+import Control.Exception (catch, IOException)
+import System.IO (hPutStr, stderr)
+import Control.Monad (void)
 
-import System.Process (callProcess, readProcess)
-import System.Directory (getCurrentDirectory, removeFile, getTemporaryDirectory)
+import System.Process (callProcess)
+import System.Directory
+       (getCurrentDirectory, removeFile, getTemporaryDirectory,
+        removeDirectoryRecursive)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.Golden (goldenVsFile)
 
@@ -42,26 +46,65 @@ import Data.ByteString.Char8 (pack, ByteString)
 
 testMakesHardcopy ::
   TestTree
-testMakesHardcopy = goldenVsFile "does not crash" "test/data/test.golden" "/tmp/testoutput" smokeTest
+testMakesHardcopy = goldenVsFile "does not crash" "test/data/test.golden" "/tmp/testoutput" (runResourceT $ tmuxSession steps "purebredtest")
+  where steps = [ApplicationStep ["Enter"]]
 
-smokeTest :: IO ()
-smokeTest = do
-  withSystemTempDirectory "purebredtest" $ \fp -> do
-    testmdir <- prepareMaildir fp
-    cfg <- prepareNotmuchCfg fp testmdir
-    _ <- prepareNotmuch cfg
-    callProcess "tmux" tmuxSessionArgs
-    callProcess "tmux" (communicateSessionArgs ++ ["-l", "purebred --database " <> testmdir])
-    callProcess "tmux" (communicateSessionArgs ++ ["Enter"])
-    _ <- setUp
-    callProcess "tmux" $ communicateSessionArgs ++ ["j", "j", "Enter"]
-    readProcess "tmux" hardcopyArgs [] >>= print
-    readProcess "tmux" (savebufferArgs "/tmp/testoutput") [] >>= print
-    teardown
+data ApplicationStep = ApplicationStep [String]
 
-waitReady :: ResourceT IO ()
-waitReady = do
-    addr <- purebredSocketAddr
+tmuxSession :: [ApplicationStep] -> String -> ResourceT IO ()
+tmuxSession xs sessionname = do
+    systmp <- liftIO $ getCanonicalTemporaryDirectory
+    testdir <- liftIO $ createTempDirectory systmp "purebredtest"
+    rkey <- register (removeDirectoryRecursive testdir)
+    mdir <-
+        liftIO $
+        do mdir <- prepareMaildir testdir
+    tmuxRkey <- createTmuxSession sessionname
+    liftIO $
+        do runSteps xs
+           snapshotState sessionname
+    release tmuxRkey
+    release rkey
+
+runSteps :: [ApplicationStep] -> IO ()
+runSteps steps = mapM_ (\(ApplicationStep xs) -> callProcess "tmux" (communicateSessionArgs ++ xs)) steps
+
+snapshotState :: String -> IO ()
+snapshotState sessionname = do
+    callProcess "tmux" hardcopyArgs
+    callProcess "tmux" (savebufferArgs ++ ["/tmp/testoutput"])
+    where
+      hardcopyArgs = ["capture-pane", "-b","purebredcapture","-t", sessionname]
+      savebufferArgs = ["save-buffer", "-b", "purebredcapture"]
+
+createTmuxSession :: String -> ResourceT IO ReleaseKey
+createTmuxSession sessionname = do
+    liftIO $
+        callProcess
+            "tmux"
+            [ "new-session"
+            , "-x"
+            , "80"
+            , "-y"
+            , "24"
+            , "-d"
+            , "-s"
+            , sessionname
+            , "-n"
+            , "purebred"]
+    register (cleanUpTmuxSession sessionname)
+
+cleanUpTmuxSession :: String -> IO ()
+cleanUpTmuxSession sessionname = do
+    catch
+        (callProcess "tmux" ["kill-session", "-t", sessionname])
+        (\e ->
+              do let err = show (e :: IOException)
+                 hPutStr stderr ("Exception when killing session: " ++ err)
+                 pure ())
+
+waitReady :: SockAddr -> ResourceT IO ()
+waitReady addr = do
     liftIO $
         do soc <- socket AF_UNIX Datagram defaultProtocol
            bind soc addr
@@ -73,42 +116,6 @@ waitReady = do
 applicationReadySignal :: ByteString
 applicationReadySignal = pack "READY=1"
 
-tmuxSessionArgs :: [String]
-tmuxSessionArgs =
-    [ "new-session"
-    , "-x"
-    , "80"
-    , "-y"
-    , "24"
-    , "-d"
-    , "-s"
-    , "purebredtest"
-    , "-n"
-    , "purebred"
-    ]
-
 communicateSessionArgs :: [String]
 communicateSessionArgs = words "send-keys -t purebredtest"
-
-hardcopyArgs :: [String]
-hardcopyArgs = words "capture-pane -p -b purebredcapture -t purebredtest:purebred"
-
-savebufferArgs :: FilePath -> [String]
-savebufferArgs hardcopypath =
-    ["save-buffer", "-b", "purebredcapture", hardcopypath]
-
-checkSessionStarted :: IO ()
-checkSessionStarted = do
-    out <- readProcess "tmux" ["list-sessions"] []
-    print out
-    if "purebredtest" `isInfixOf` out
-        then pure ()
-        else error "no session created"
-
-teardown :: IO ()
-teardown = do
-  -- quit the application
-  callProcess "tmux" $ communicateSessionArgs ++ (words "Esc Enter")
-  -- XXX make sure it's dead
-  callProcess "tmux" $ words "unlink-window -k -t purebredtest"
 
