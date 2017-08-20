@@ -47,11 +47,19 @@ import qualified Data.ByteString.Lazy as LBS
 
 testMakesHardcopy ::
   TestTree
-testMakesHardcopy = goldenVsString "does not crash" "test/data/viewMail.golden" (runResourceT $ tmuxSession steps "purebredtest")
-  where steps = [ApplicationStep ["Enter"]]
+testMakesHardcopy =
+    goldenVsString
+        "does not crash"
+        "test/data/viewMail.golden"
+        (runResourceT $ tmuxSession steps "purebredtest")
+  where
+    steps = [ApplicationStep "Enter" False]
 
 
-data ApplicationStep = ApplicationStep [String]
+data ApplicationStep = ApplicationStep
+    { asCommand :: String  -- ^ the actual commands to send
+    , asAsLiteralKey :: Bool  -- ^ disables key name lookup and sends literal input
+    }
 
 tmuxSession :: [ApplicationStep] -> String -> ResourceT IO (LBS.ByteString)
 tmuxSession xs sessionname = do
@@ -73,7 +81,7 @@ tmuxSession xs sessionname = do
     pure tout
 
 runSteps :: [ApplicationStep] -> IO ()
-runSteps steps = mapM_ (\(ApplicationStep xs) -> callProcess "tmux" (communicateSessionArgs ++ xs)) steps
+runSteps steps = mapM_ (\(ApplicationStep xs asLiteral) -> callProcess "tmux" $ communicateSessionArgs xs asLiteral) steps
 
 snapshotState :: String -> FilePath -> IO (FilePath)
 snapshotState sessionname testdir = do
@@ -122,6 +130,12 @@ waitReady addr = do
 applicationReadySignal :: ByteString
 applicationReadySignal = pack "READY=1"
 
-communicateSessionArgs :: [String]
-communicateSessionArgs = words "send-keys -t purebredtest"
+communicateSessionArgs :: String -> Bool -> [String]
+communicateSessionArgs keys asLiteral =
+    let base = words "send-keys -t purebredtest"
+        postfix =
+            if asLiteral
+                then ["-l"]
+                else []
+    in base ++ postfix ++ [keys]
 
