@@ -45,17 +45,6 @@ import Network.Socket.ByteString (recv)
 import Data.ByteString.Char8 (pack, ByteString)
 import qualified Data.ByteString.Lazy as LBS
 
-testMakesHardcopy ::
-  TestTree
-testMakesHardcopy =
-    goldenVsString
-        "does not crash"
-        "test/data/viewMail.golden"
-        (runResourceT $ tmuxSession steps "purebredtest")
-  where
-    steps = [ApplicationStep "Enter" False]
-
-
 data ApplicationStep = ApplicationStep
     { asCommand :: String  -- ^ the actual commands to send
     , asAsLiteralKey :: Bool  -- ^ disables key name lookup and sends literal input
@@ -81,7 +70,11 @@ tmuxSession xs sessionname = do
     pure tout
 
 runSteps :: [ApplicationStep] -> IO ()
-runSteps steps = mapM_ (\(ApplicationStep xs asLiteral) -> callProcess "tmux" $ communicateSessionArgs xs asLiteral) steps
+runSteps steps =
+    mapM_
+        (\(ApplicationStep xs asLiteral) ->
+              callProcess "tmux" $ communicateSessionArgs xs asLiteral)
+        steps
 
 snapshotState :: String -> FilePath -> IO (FilePath)
 snapshotState sessionname testdir = do
