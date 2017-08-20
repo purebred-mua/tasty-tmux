@@ -18,6 +18,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Test.Tasty.Tmux where
 
+import UI.Index.Keybindings (applicationReadySignal, purebredSocketAddr)
 import qualified Data.Text as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Semigroup ((<>))
@@ -119,9 +120,6 @@ waitReady addr = do
            if d /= applicationReadySignal
                then error "application did not start up in time"
                else close soc
-
-applicationReadySignal :: ByteString
-applicationReadySignal = pack "READY=1"
 
 communicateSessionArgs :: String -> Bool -> [String]
 communicateSessionArgs keys asLiteral =
