@@ -115,7 +115,7 @@ holdOffTime = 10^6
 --   wait a bit and try again.
 waitForString :: MVar String -> String -> String -> IO (String)
 waitForString baton sessionname substr = do
-    out <- readProcess "tmux" ["capture-pane", "-p", "-t", sessionname] []
+    out <- readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
     if substr `isInfixOf` out
         then putMVar baton "ready" >> pure out
         else do
