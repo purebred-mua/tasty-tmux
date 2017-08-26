@@ -104,9 +104,6 @@ performStep sessionname (ApplicationStep keys _ asLiteral expect _) = do
     _ <- takeMVar baton
     pure out
 
-capturePane :: String -> IO String
-capturePane sessionname = readProcess "tmux" ["capture-pane", "-p", "-t", sessionname] []
-
 holdOffTime :: Int
 holdOffTime = 10^6
 
