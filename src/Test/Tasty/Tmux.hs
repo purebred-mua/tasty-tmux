@@ -86,8 +86,10 @@ cleanUpTmuxSession sessionname = do
 
 
 -- | Run all application steps in a session defined by session name.
-tmuxSession :: IO String -> String -> [ApplicationStep] -> TestTree
-tmuxSession _ tcname xs = testCaseSteps tcname $ \step -> runSteps step xs
+tmuxSession :: String -> [ApplicationStep] -> TestTree
+tmuxSession tcname xs =
+  withResource setUp tearDown $
+  \_ -> testCaseSteps tcname $ \step -> runSteps step xs
 
 runSteps :: (String -> IO ()) -> [ApplicationStep] -> IO ()
 runSteps stepfx steps =
