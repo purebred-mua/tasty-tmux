@@ -14,6 +14,7 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Test.Tasty.Tmux where
@@ -21,37 +22,31 @@ module Test.Tasty.Tmux where
 import qualified Data.Text as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Semigroup ((<>))
-import Control.Concurrent
-       (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Exception (catch, IOException)
 import System.IO (hPutStr, stderr)
 import System.Environment (lookupEnv)
 import Control.Monad (void, when)
 import Data.Maybe (isJust)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (runReaderT, ask, ReaderT)
 
+import Control.Lens (view, _3, _2)
 import Data.List (isInfixOf)
 import System.Process (callProcess, readProcess)
 import System.Directory
        (getCurrentDirectory, removeDirectoryRecursive)
-import Test.Tasty (TestTree, testGroup, withResource, mkTimeout, localOption)
-import Test.Tasty.HUnit (testCaseSteps, assertBool, Assertion)
+import Test.Tasty (TestTree, TestName, testGroup, withResource)
+import Test.Tasty.HUnit (testCaseSteps, assertBool)
+import Text.Regex.Posix ((=~))
 
--- | maximum amount of time we allow a step to run until we fail it
--- 6 seconds should be plenty
-testTimeout :: Integer
-testTimeout = 10 ^ 6 * 8
+type Env = (String, String, String)
 
+assertSubstrInOutput :: String -> String -> ReaderT Env IO ()
+assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
-data ApplicationStep = ApplicationStep
-    { asKeys :: String  -- ^ the actual commands to send
-    , asDescription :: String  -- ^ step definition
-    , asAsLiteralKey :: Bool  -- ^ disables key name lookup and sends literal input
-    , asExpected :: String  -- ^ wait until the terminal shows the expected string or timeout
-    , asAssertInOutput :: String -> String -> Assertion  -- ^ assert this against the snapshot
-    }
-
-assertSubstrInOutput :: String -> String -> Assertion
-assertSubstrInOutput out substr = assertBool "in out" $ substr `isInfixOf` out
+assertRegex :: String -> String -> ReaderT Env IO ()
+assertRegex regex out = liftIO $ assertBool (regex <> " does not match out\n\n" <> out) $ out =~ (regex :: String)
 
 defaultSessionName :: String
 defaultSessionName = "purebredtest"
@@ -81,55 +76,65 @@ cleanUpTmuxSession sessionname = do
         (callProcess "tmux" ["kill-session", "-t", sessionname])
         (\e ->
               do let err = show (e :: IOException)
-                 hPutStr stderr ("Exception when killing session: " ++ err)
+                 hPutStr stderr ("Exception when killing session: " <> err)
                  pure ())
 
 
 -- | Run all application steps in a session defined by session name.
-tmuxSession :: String -> [ApplicationStep] -> TestTree
-tmuxSession tcname xs =
-  withResource setUp tearDown $
-  \_ -> testCaseSteps tcname $ \step -> runSteps step xs
+withTmuxSession :: TestName -> ((String -> IO ()) -> ReaderT Env IO ()) -> TestTree
+withTmuxSession tcname testfx =
+    withResource setUp tearDown $
+      \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
 
-runSteps :: (String -> IO ()) -> [ApplicationStep] -> IO ()
-runSteps stepfx steps =
-    mapM_
-        (\a ->
-              do stepfx (asDescription a)
-                 out <- performStep "purebredtest" a
-                 d <- lookupEnv "DEBUG"
-                 when (isJust d) $ hPutStr stderr ("\n\n" ++ asDescription a ++ "\n\n" ++ out)
-                 ((asAssertInOutput a) out (asExpected a)))
-        steps
+sendKeys :: String -> String -> ReaderT Env IO (String)
+sendKeys keys expect = do
+    liftIO $ callProcess "tmux" $ communicateSessionArgs keys False
+    waitForString expect defaultCountdown
 
-performStep :: String -> ApplicationStep -> IO (String)
-performStep sessionname (ApplicationStep keys _ asLiteral expect _) = do
-    callProcess "tmux" $ communicateSessionArgs keys asLiteral
-    baton <- newEmptyMVar
-    out <- waitForString baton sessionname expect
-    _ <- takeMVar baton
-    pure out
+sendLiteralKeys :: String -> ReaderT Env IO (String)
+sendLiteralKeys keys = do
+    liftIO $ callProcess "tmux" $ communicateSessionArgs keys True
+    waitForString keys defaultCountdown
+
+capture :: ReaderT Env IO (String)
+capture = do
+  sessionname <- getSessionName
+  liftIO $ readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
+
+getSessionName :: ReaderT Env IO (String)
+getSessionName = view (_3 . ask)
 
 holdOffTime :: Int
 holdOffTime = 10^6
 
 -- | wait for the application to render a new interface which we determine with
---   a given substring. If the expected substring is not in the captured pane,
---   wait a bit and try again.
-waitForString :: MVar String -> String -> String -> IO (String)
-waitForString baton sessionname substr = do
-    out <- readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
-    if substr `isInfixOf` out
-        then putMVar baton "ready" >> pure out
-        else do
-            threadDelay holdOffTime
-            waitForString baton sessionname substr
+--   a given substring. If we exceed the number of tries return with the last
+--   captured output, but indicate an error by setting the baton to 0
+waitForString :: String -> Int -> ReaderT Env IO (String)
+waitForString substr n = do
+  out <- capture >>= checkPane
+  liftIO $ assertBool ("Wait time exceeded. Expected: '"
+                       <> substr
+                       <> "' last screen shot:\n\n "
+                       <> out) (substr `isInfixOf` out)
+  pure out
+  where
+    checkPane :: String -> ReaderT Env IO String
+    checkPane out
+      | substr `isInfixOf` out = pure out
+      | n <= 0 = pure out
+      | otherwise = do
+          liftIO $ threadDelay holdOffTime
+          waitForString substr (n - 1)
+
+defaultCountdown :: Int
+defaultCountdown = 5
 
 communicateSessionArgs :: String -> Bool -> [String]
 communicateSessionArgs keys asLiteral =
-    let base = words $ "send-keys -t " ++ defaultSessionName
+    let base = words $ "send-keys -t " <> defaultSessionName
         postfix =
             if asLiteral
                 then ["-l"]
                 else []
-    in base ++ postfix ++ [keys]
+    in base <> postfix <> [keys]
