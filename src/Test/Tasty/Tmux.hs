@@ -16,7 +16,10 @@
 
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
+
 {-# LANGUAGE OverloadedStrings #-}
+
 module Test.Tasty.Tmux where
 
 import qualified Data.Text as T
@@ -32,7 +35,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT, ask, ReaderT)
 
 import Control.Lens (view, _3, _2)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, intercalate)
 import System.Process (callProcess, readProcess)
 import System.Directory
        (getCurrentDirectory, removeDirectoryRecursive)
@@ -40,13 +43,19 @@ import Test.Tasty (TestTree, TestName, testGroup, withResource)
 import Test.Tasty.HUnit (testCaseSteps, assertBool)
 import Text.Regex.Posix ((=~))
 
+-- | A condition to check for in the output of the program
+data Condition
+  = Literal String
+  | Regex String
+  deriving (Show)
+
 type Env = (String, String, String)
 
 assertSubstrInOutput :: String -> String -> ReaderT Env IO ()
 assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
 assertRegex :: String -> String -> ReaderT Env IO ()
-assertRegex regex out = liftIO $ assertBool (regex <> " does not match out\n\n" <> out) $ out =~ (regex :: String)
+assertRegex regex out = liftIO $ assertBool (regex <> " does not match out\n\n" <> out <> "\n\n raw:\n\n" <> show out) $ out =~ (regex :: String)
 
 defaultSessionName :: String
 defaultSessionName = "purebredtest"
@@ -86,10 +95,13 @@ withTmuxSession tcname testfx =
     withResource setUp tearDown $
       \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
 
-sendKeys :: String -> String -> ReaderT Env IO (String)
+-- | Send keys into the program and wait for the condition to be
+-- met, failing the test if the condition is not met after some
+-- time.
+sendKeys :: String -> Condition -> ReaderT Env IO String
 sendKeys keys expect = do
     liftIO $ callProcess "tmux" $ communicateSessionArgs keys False
-    waitForString expect defaultCountdown
+    waitForCondition expect defaultCountdown
 
 sendLiteralKeys :: String -> ReaderT Env IO (String)
 sendLiteralKeys keys = do
@@ -108,24 +120,35 @@ holdOffTime :: Int
 holdOffTime = 10^6
 
 -- | wait for the application to render a new interface which we determine with
---   a given substring. If we exceed the number of tries return with the last
---   captured output, but indicate an error by setting the baton to 0
-waitForString :: String -> Int -> ReaderT Env IO (String)
-waitForString substr n = do
+--   a given condition. We check up to @n@ times, waiting a short duration
+--   between each check, and failing if the tries exhaust with the condition
+--   not met.
+waitForCondition :: Condition -> Int -> ReaderT Env IO String
+waitForCondition cond n = do
   out <- capture >>= checkPane
-  liftIO $ assertBool ("Wait time exceeded. Expected: '"
-                       <> substr
-                       <> "' last screen shot:\n\n "
-                       <> out) (substr `isInfixOf` out)
+  liftIO $ assertBool
+    ( "Wait time exceeded. Condition not met: '" <> show cond
+      <> "' last screen shot:\n\n " <> out <> "\n\n" <> " raw: " <> show out )
+    (checkCondition cond out)
   pure out
   where
     checkPane :: String -> ReaderT Env IO String
     checkPane out
-      | substr `isInfixOf` out = pure out
+      | checkCondition cond out = pure out
       | n <= 0 = pure out
       | otherwise = do
           liftIO $ threadDelay holdOffTime
-          waitForString substr (n - 1)
+          waitForCondition cond (n - 1)
+
+checkCondition :: Condition -> String -> Bool
+checkCondition (Literal s) = (s `isInfixOf`)
+checkCondition (Regex re) = (=~ re)
+
+-- | Convenience version of 'waitForCondition' that checks for a
+-- literal string.
+--
+waitForString :: String -> Int -> ReaderT Env IO (String)
+waitForString = waitForCondition . Literal
 
 defaultCountdown :: Int
 defaultCountdown = 5
@@ -138,3 +161,35 @@ communicateSessionArgs keys asLiteral =
                 then ["-l"]
                 else []
     in base <> postfix <> [keys]
+
+
+type AnsiAttrParam = String
+type AnsiFGParam = String
+type AnsiBGParam = String
+
+-- | Generate a regex for an escape sequence setting the given
+-- foreground and background parameters
+--
+-- tmux < 03d01eabb5c5227f56b6b44d04964c1328802628 (first released
+-- in tmux-2.5) ran attributes, foreground colour and background
+-- colour params separated by semicolons (foreground first).
+--
+-- After that commit, attributes, foreground colours and background
+-- colours are written in separate escape sequences.  Therefore for
+-- compatibility with different versions of tmux there are two
+-- patterns to check.
+--
+buildAnsiRegex :: [AnsiAttrParam] -> [AnsiFGParam] -> [AnsiBGParam] -> String
+buildAnsiRegex attrs fgs bgs =
+  let
+    withSemis = intercalate ";"
+    wrap [] = ""
+    wrap xs = "\ESC\\[" <> withSemis xs <> "m"
+    tmux24 = wrap (attrs <> fgs <> bgs)
+    tmux25 = wrap attrs <> wrap fgs <> wrap bgs
+    choice "" "" = ""
+    choice "" r = r
+    choice l "" = l
+    choice l r = "(" <> l <> "|" <> r <> ")"
+  in
+    choice tmux24 tmux25
