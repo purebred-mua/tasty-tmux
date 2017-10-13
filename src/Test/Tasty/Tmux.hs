@@ -64,23 +64,20 @@ defaultSessionName = "purebredtest"
 -- Note: the width and height are the default values tmux uses, but I thought
 -- it's better to be explicit.
 setUpTmuxSession :: String -> IO ()
-setUpTmuxSession sessionname = do
+setUpTmuxSession sessionname =
     callProcess
         "tmux"
         [ "new-session"
-        , "-x"
-        , "80"
-        , "-y"
-        , "24"
+        , "-x", "80"
+        , "-y", "24"
         , "-d"
-        , "-s"
-        , sessionname
-        , "-n"
-        , "purebred"]
+        , "-s", sessionname
+        , "-n", "purebred"
+        ]
 
 -- | Kills the whole session including pane and application
 cleanUpTmuxSession :: String -> IO ()
-cleanUpTmuxSession sessionname = do
+cleanUpTmuxSession sessionname =
     catch
         (callProcess "tmux" ["kill-session", "-t", sessionname])
         (\e ->
@@ -103,17 +100,17 @@ sendKeys keys expect = do
     liftIO $ callProcess "tmux" $ communicateSessionArgs keys False
     waitForCondition expect defaultCountdown
 
-sendLiteralKeys :: String -> ReaderT Env IO (String)
+sendLiteralKeys :: String -> ReaderT Env IO String
 sendLiteralKeys keys = do
     liftIO $ callProcess "tmux" $ communicateSessionArgs keys True
     waitForString keys defaultCountdown
 
-capture :: ReaderT Env IO (String)
+capture :: ReaderT Env IO String
 capture = do
   sessionname <- getSessionName
   liftIO $ readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
 
-getSessionName :: ReaderT Env IO (String)
+getSessionName :: ReaderT Env IO String
 getSessionName = view (_3 . ask)
 
 holdOffTime :: Int
@@ -147,7 +144,7 @@ checkCondition (Regex re) = (=~ re)
 -- | Convenience version of 'waitForCondition' that checks for a
 -- literal string.
 --
-waitForString :: String -> Int -> ReaderT Env IO (String)
+waitForString :: String -> Int -> ReaderT Env IO String
 waitForString = waitForCondition . Literal
 
 defaultCountdown :: Int
@@ -155,12 +152,7 @@ defaultCountdown = 5
 
 communicateSessionArgs :: String -> Bool -> [String]
 communicateSessionArgs keys asLiteral =
-    let base = words $ "send-keys -t " <> defaultSessionName
-        postfix =
-            if asLiteral
-                then ["-l"]
-                else []
-    in base <> postfix <> [keys]
+  ["send-keys", "-t", defaultSessionName] <> ["-l" | asLiteral] <> [keys]
 
 
 type AnsiAttrParam = String
