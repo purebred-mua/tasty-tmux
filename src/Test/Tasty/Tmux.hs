@@ -27,7 +27,7 @@ import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Semigroup ((<>))
 import Control.Concurrent (threadDelay)
 import Control.Exception (catch, IOException)
-import System.IO (hPutStr, stderr)
+import System.IO (hPutStr, hPutStrLn, stderr)
 import System.Environment (lookupEnv)
 import Control.Monad (void, when)
 import Data.Maybe (isJust)
@@ -65,15 +65,23 @@ defaultSessionName = "purebredtest"
 -- it's better to be explicit.
 setUpTmuxSession :: String -> IO ()
 setUpTmuxSession sessionname =
-    callProcess
-        "tmux"
-        [ "new-session"
-        , "-x", "80"
-        , "-y", "24"
-        , "-d"
-        , "-s", sessionname
-        , "-n", "purebred"
-        ]
+    catch
+        (callProcess
+             "tmux"
+             [ "new-session"
+             , "-x"
+             , "80"
+             , "-y"
+             , "24"
+             , "-d"
+             , "-s"
+             , sessionname
+             , "-n"
+             , "purebred"])
+        (\e ->
+              do let err = show (e :: IOException)
+                 hPutStrLn stderr ("\nException during setUp: " <> err)
+                 pure ())
 
 -- | Kills the whole session including pane and application
 cleanUpTmuxSession :: String -> IO ()
@@ -82,7 +90,7 @@ cleanUpTmuxSession sessionname =
         (callProcess "tmux" ["kill-session", "-t", sessionname])
         (\e ->
               do let err = show (e :: IOException)
-                 hPutStr stderr ("Exception when killing session: " <> err)
+                 hPutStrLn stderr ("\nException when killing session: " <> err)
                  pure ())
 
 
