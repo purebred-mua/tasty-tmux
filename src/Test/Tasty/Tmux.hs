@@ -24,6 +24,7 @@ module Test.Tasty.Tmux where
 
 import qualified Data.Text as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
+import Data.Functor (($>))
 import Data.Semigroup ((<>))
 import Control.Concurrent (threadDelay)
 import Control.Exception (catch, IOException)
@@ -34,7 +35,7 @@ import Data.Maybe (isJust)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT, ask, ReaderT)
 
-import Control.Lens (view, _3, _2)
+import Control.Lens (Lens', view)
 import Data.List (isInfixOf, intercalate)
 import System.Process (callProcess, readProcess)
 import System.Directory
@@ -49,8 +50,6 @@ data Condition
   | Regex String
   deriving (Show)
 
-type Env = (String, String, String)
-
 assertSubstrInOutput :: String -> String -> ReaderT Env IO ()
 assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
@@ -62,6 +61,10 @@ assertRegex regex out = liftIO $ assertBool
 
 defaultSessionName :: String
 defaultSessionName = "purebredtest"
+
+envSessionName :: Lens' Env String
+envSessionName f (Env a b c) = fmap (\c' -> Env a b c') (f c)
+{-# ANN envSessionName ("HLint: ignore Avoid lambda" :: String) #-}
 
 -- | create a tmux session running in the background
 -- Note: the width and height are the default values tmux uses, but I thought
@@ -98,9 +101,13 @@ cleanUpTmuxSession sessionname =
 
 
 -- | Run all application steps in a session defined by session name.
-withTmuxSession :: TestName -> ((String -> IO ()) -> ReaderT Env IO ()) -> TestTree
-withTmuxSession tcname testfx =
-    withResource setUp tearDown $
+withTmuxSession
+  :: TestName
+  -> ((String -> IO ()) -> ReaderT Env IO ())
+  -> Int  -- ^ session sequence number (will be appended to session name)
+  -> TestTree
+withTmuxSession tcname testfx i =
+  withResource (setUp i) tearDown $
       \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
 
 -- | Send keys into the program and wait for the condition to be
@@ -108,12 +115,14 @@ withTmuxSession tcname testfx =
 -- time.
 sendKeys :: String -> Condition -> ReaderT Env IO String
 sendKeys keys expect = do
-    liftIO $ callProcess "tmux" $ communicateSessionArgs keys False
+    sessionName <- getSessionName
+    liftIO $ callProcess "tmux" $ communicateSessionArgs sessionName keys False
     waitForCondition expect defaultCountdown
 
 sendLiteralKeys :: String -> ReaderT Env IO String
 sendLiteralKeys keys = do
-    liftIO $ callProcess "tmux" $ communicateSessionArgs keys True
+    sessionName <- getSessionName
+    liftIO $ callProcess "tmux" $ communicateSessionArgs sessionName keys True
     waitForString keys defaultCountdown
 
 capture :: ReaderT Env IO String
@@ -122,7 +131,7 @@ capture = do
   liftIO $ readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
 
 getSessionName :: ReaderT Env IO String
-getSessionName = view (_3 . ask)
+getSessionName = view (envSessionName . ask)
 
 holdOffTime :: Int
 holdOffTime = 10^6
@@ -161,9 +170,13 @@ waitForString = waitForCondition . Literal
 defaultCountdown :: Int
 defaultCountdown = 5
 
-communicateSessionArgs :: String -> Bool -> [String]
-communicateSessionArgs keys asLiteral =
-  ["send-keys", "-t", defaultSessionName] <> ["-l" | asLiteral] <> [keys]
+communicateSessionArgs
+  :: String -- ^ session name
+  -> String -- ^ keys
+  -> Bool   -- ^ send the keys literally
+  -> [String]
+communicateSessionArgs sessionName keys asLiteral =
+  ["send-keys", "-t", sessionName] <> ["-l" | asLiteral] <> [keys]
 
 
 type AnsiAttrParam = String
