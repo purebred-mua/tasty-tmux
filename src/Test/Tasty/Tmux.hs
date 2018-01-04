@@ -14,10 +14,6 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
-{-# OPTIONS_GHC -fno-warn-type-defaults #-}
-{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
-
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Tasty.Tmux where
@@ -50,10 +46,10 @@ data Condition
   | Regex String
   deriving (Show)
 
-assertSubstrInOutput :: String -> String -> ReaderT Env IO ()
+assertSubstrInOutput :: String -> String -> ReaderT a IO ()
 assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
-assertRegex :: String -> String -> ReaderT Env IO ()
+assertRegex :: String -> String -> ReaderT a IO ()
 assertRegex regex out = liftIO $ assertBool
   (show regex <> " does not match out\n\n" <> out
     <> "\n\n raw:\n\n" <> show out)
@@ -130,7 +126,7 @@ capture = do
   sessionname <- getSessionName
   liftIO $ readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
 
-getSessionName :: ReaderT Env IO String
+getSessionName :: (Monad m) => ReaderT Env m String
 getSessionName = view (envSessionName . ask)
 
 holdOffTime :: Int
