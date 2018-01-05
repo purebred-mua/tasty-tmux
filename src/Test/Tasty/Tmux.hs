@@ -130,7 +130,7 @@ getSessionName :: (Monad m) => ReaderT Env m String
 getSessionName = view (envSessionName . ask)
 
 holdOffTime :: Int
-holdOffTime = 10^6
+holdOffTime = 10 ^ (6 :: Int)
 
 -- | wait for the application to render a new interface which we determine with
 --   a given condition. We check up to @n@ times, waiting a short duration
