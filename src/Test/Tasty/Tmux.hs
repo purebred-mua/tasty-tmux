@@ -56,8 +56,8 @@ assertRegex regex out = liftIO $ assertBool
     <> "\n\n raw:\n\n" <> show out)
   (out =~ regex)
 
-defaultSessionName :: String
-defaultSessionName = "purebredtest"
+sessionNamePrefix :: String
+sessionNamePrefix = "purebredtest"
 
 envSessionName :: Lens' Env String
 envSessionName f (Env a b c) = fmap (\c' -> Env a b c') (f c)
