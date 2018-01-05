@@ -18,6 +18,7 @@
 
 module Test.Tasty.Tmux where
 
+import Data.Char (isAscii, isAlphaNum)
 import qualified Data.Text as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Functor (($>))
@@ -103,7 +104,7 @@ withTmuxSession
   -> Int  -- ^ session sequence number (will be appended to session name)
   -> TestTree
 withTmuxSession tcname testfx i =
-  withResource (setUp i) tearDown $
+  withResource (setUp i tcname) tearDown $
       \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
 
 -- | Send keys into the program and wait for the condition to be
