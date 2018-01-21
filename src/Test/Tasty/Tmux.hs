@@ -167,6 +167,14 @@ waitForString = waitForCondition . Literal
 defaultCountdown :: Int
 defaultCountdown = 5
 
+-- | Sets a shell environment variable
+-- Note: The tmux program provides a command to set environment variables for
+-- running sessions, yet they seem to be not inherited by the shell.
+setEnvVarInSession :: String -> String -> ReaderT Env IO ()
+setEnvVarInSession name value = do
+  void $ sendLiteralKeys ("export " <> name <> "=" <> value)
+  void $ sendKeys "Enter" (Literal name)
+
 communicateSessionArgs
   :: String -- ^ session name
   -> String -- ^ keys
