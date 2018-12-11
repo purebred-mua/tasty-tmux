@@ -124,7 +124,7 @@ withTmuxSession tcname testfx gEnv i =
 sendKeys :: String -> Condition -> ReaderT Env IO String
 sendKeys keys expect = do
     tmuxSendKeys InterpretKeys keys
-    waitForCondition expect defaultCountdown
+    waitForCondition expect defaultCountdown initialBackoffMicroseconds
 
 sendLiteralKeys :: String -> ReaderT Env IO String
 sendLiteralKeys keys = do
@@ -140,15 +140,19 @@ capture =
     ]
   >>= liftIO . readProcessWithErrorOutput_
 
-holdOffTime :: Int
-holdOffTime = 10 ^ (6 :: Int)
+initialBackoffMicroseconds :: Int
+initialBackoffMicroseconds = 20 * 10 ^ (3 :: Int)
 
 -- | wait for the application to render a new interface which we determine with
---   a given condition. We check up to @n@ times, waiting a short duration
---   between each check, and failing if the tries exhaust with the condition
---   not met.
-waitForCondition :: Condition -> Int -> ReaderT Env IO String
-waitForCondition cond n = do
+--   a given condition. We wait a short duration and increase the wait time
+--   exponentially until the count down reaches 0. We fail if until then the
+--   condition is not met.
+waitForCondition ::
+ Condition
+ -> Int  -- ^ count down value
+ -> Int  -- ^ milliseconds to back off
+ -> ReaderT Env IO String
+waitForCondition cond n backOff = do
   out <- capture >>= checkPane
   liftIO $ assertBool
     ( "Wait time exceeded. Condition not met: '" <> show cond
@@ -161,8 +165,8 @@ waitForCondition cond n = do
       | checkCondition cond out = pure out
       | n <= 0 = pure out
       | otherwise = do
-          liftIO $ threadDelay holdOffTime
-          waitForCondition cond (n - 1)
+          liftIO $ threadDelay backOff
+          waitForCondition cond (n - 1) (backOff * 4)
 
 checkCondition :: Condition -> String -> Bool
 checkCondition Unconditional = const True
@@ -173,7 +177,7 @@ checkCondition (Regex re) = (=~ re)
 -- literal string.
 --
 waitForString :: String -> Int -> ReaderT Env IO String
-waitForString = waitForCondition . Literal
+waitForString substr n = waitForCondition (Literal substr) n initialBackoffMicroseconds
 
 defaultCountdown :: Int
 defaultCountdown = 5
