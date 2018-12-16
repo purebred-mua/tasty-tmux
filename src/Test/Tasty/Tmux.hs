@@ -18,23 +18,30 @@
 
 module Test.Tasty.Tmux where
 
-import Data.Char (isAscii, isAlphaNum)
+import Data.Char (isAscii, isAlphaNum, chr)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Functor (($>))
 import Data.Semigroup ((<>))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.STM (atomically)
 import Control.Exception (catch, IOException)
-import System.IO (hPutStr, hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, stderr, stdout)
 import System.Environment (lookupEnv)
 import Control.Monad (void, when)
 import Data.Maybe (isJust)
+import Data.List (intercalate, isInfixOf)
+import qualified Data.ByteString.Lazy as LB
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT, ask, ReaderT)
 
 import Control.Lens (Lens', view)
-import Data.List (isInfixOf, intercalate)
-import System.Process (callProcess, readProcess)
+import System.Process.Typed
+       (proc, runProcess_, withProcess_,
+        waitExitCodeSTM, setStdout, getStdout, setStderr, useHandleOpen,
+        byteStringOutput, setStdin, closed, ProcessConfig)
 import System.Directory
        (getCurrentDirectory, removeDirectoryRecursive)
 import Test.Tasty (TestTree, TestName, testGroup, withResource)
@@ -69,7 +76,7 @@ envSessionName f (Env a b c) = fmap (\c' -> Env a b c') (f c)
 setUpTmuxSession :: String -> IO ()
 setUpTmuxSession sessionname =
     catch
-        (callProcess
+        (runProcess_ $ proc
              "tmux"
              [ "new-session"
              , "-x"
@@ -90,7 +97,7 @@ setUpTmuxSession sessionname =
 cleanUpTmuxSession :: String -> IO ()
 cleanUpTmuxSession sessionname =
     catch
-        (callProcess "tmux" ["kill-session", "-t", sessionname])
+        (runProcess_ $ proc "tmux" ["kill-session", "-t", sessionname])
         (\e ->
               do let err = show (e :: IOException)
                  hPutStrLn stderr ("\nException when killing session: " <> err)
@@ -113,19 +120,19 @@ withTmuxSession tcname testfx i =
 sendKeys :: String -> Condition -> ReaderT Env IO String
 sendKeys keys expect = do
     sessionName <- getSessionName
-    liftIO $ callProcess "tmux" $ communicateSessionArgs sessionName keys False
+    liftIO $ runProcess_ $ proc "tmux" $ communicateSessionArgs sessionName keys False
     waitForCondition expect defaultCountdown
 
 sendLiteralKeys :: String -> ReaderT Env IO String
 sendLiteralKeys keys = do
     sessionName <- getSessionName
-    liftIO $ callProcess "tmux" $ communicateSessionArgs sessionName keys True
+    liftIO $ runProcess_ $ proc "tmux" $ communicateSessionArgs sessionName keys True
     waitForString keys defaultCountdown
 
 capture :: ReaderT Env IO String
 capture = do
   sessionname <- getSessionName
-  liftIO $ readProcess "tmux" ["capture-pane", "-e", "-p", "-t", sessionname] []
+  liftIO $ readProcessWithErrorOutput_ $ proc "tmux" ["capture-pane", "-e", "-p", "-t", sessionname]
 
 getSessionName :: (Monad m) => ReaderT Env m String
 getSessionName = view (envSessionName . ask)
@@ -214,3 +221,16 @@ buildAnsiRegex attrs fgs bgs =
     choice l r = "(" <> l <> "|" <> r <> ")"
   in
     choice tmux24 tmux25
+
+-- | Interleaves stderr with stdout
+-- Does not accept STDIN arguments, since we do not need to communicate with the
+-- process
+readProcessWithErrorOutput_ :: ProcessConfig stdinClosed stdout stderr -> IO String
+readProcessWithErrorOutput_ pc = do
+  (_, out) <- withProcess_ config $ \p -> atomically $ (,) <$> waitExitCodeSTM p <*> getStdout p
+  pure $ T.unpack $ decodeLenient $ LB.toStrict out
+  where
+    config = setStdout byteStringOutput
+             $ setStderr (useHandleOpen stdout)
+             $ setStdin closed pc
+    decodeLenient = T.decodeUtf8With T.lenientDecode
