@@ -51,7 +51,8 @@ import Text.Regex.Posix ((=~))
 
 -- | A condition to check for in the output of the program
 data Condition
-  = Literal String
+  = Unconditional
+  | Literal String
   | Regex String
   deriving (Show)
 
@@ -162,6 +163,7 @@ waitForCondition cond n = do
           waitForCondition cond (n - 1)
 
 checkCondition :: Condition -> String -> Bool
+checkCondition Unconditional = const True
 checkCondition (Literal s) = (s `isInfixOf`)
 checkCondition (Regex re) = (=~ re)
 
