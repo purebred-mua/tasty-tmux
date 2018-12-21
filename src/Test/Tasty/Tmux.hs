@@ -130,7 +130,11 @@ sendLiteralKeys keys = do
 
 capture :: ReaderT Env IO String
 capture =
-  tmuxSessionProc "capture-pane" ["-e", "-p"]
+  tmuxSessionProc "capture-pane"
+    [ "-e"  -- include escape sequences
+    , "-p"  -- send output to stdout
+    , "-J"  -- join wrapped lines and preserve trailing whitespace
+    ]
   >>= liftIO . readProcessWithErrorOutput_
 
 holdOffTime :: Int
