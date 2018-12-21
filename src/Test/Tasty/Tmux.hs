@@ -24,7 +24,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
-import Data.Functor (($>))
 import Data.Semigroup ((<>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
@@ -32,13 +31,13 @@ import Control.Exception (catch, IOException)
 import System.IO (hPutStr, hPutStrLn, stderr, stdout)
 import System.Environment (lookupEnv)
 import Control.Monad (void, when)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.List (intercalate, isInfixOf)
 import qualified Data.ByteString.Lazy as LB
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (MonadIO, MonadReader, runReaderT, ReaderT)
 
-import Control.Lens (Lens', view)
+import Control.Lens (Getter, Lens', to, view)
 import System.Process.Typed
        (proc, runProcess_, withProcess_,
         waitExitCodeSTM, setStdout, getStdout, setStderr, useHandleOpen,
@@ -56,6 +55,8 @@ data Condition
   | Regex String
   deriving (Show)
 
+type TestCase = IO GlobalEnv -> Int -> TestTree
+
 assertSubstrInOutput :: String -> String -> ReaderT a IO ()
 assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
@@ -69,7 +70,7 @@ sessionNamePrefix :: String
 sessionNamePrefix = "purebredtest"
 
 envSessionName :: Lens' Env String
-envSessionName f (Env a b c) = fmap (\c' -> Env a b c') (f c)
+envSessionName f (Env a b c d) = fmap (\d' -> Env a b c d') (f d)
 {-# ANN envSessionName ("HLint: ignore Avoid lambda" :: String) #-}
 
 -- | create a tmux session running in the background
@@ -110,10 +111,11 @@ cleanUpTmuxSession sessionname =
 withTmuxSession
   :: TestName
   -> ((String -> IO ()) -> ReaderT Env IO ())
+  -> IO GlobalEnv
   -> Int  -- ^ session sequence number (will be appended to session name)
   -> TestTree
-withTmuxSession tcname testfx i =
-  withResource (setUp i tcname) tearDown $
+withTmuxSession tcname testfx gEnv i =
+  withResource (setUp gEnv i tcname) tearDown $
       \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
 
 -- | Send keys into the program and wait for the condition to be
