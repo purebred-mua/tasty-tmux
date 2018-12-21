@@ -14,6 +14,7 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Tasty.Tmux where
@@ -35,7 +36,7 @@ import Data.Maybe (isJust)
 import Data.List (intercalate, isInfixOf)
 import qualified Data.ByteString.Lazy as LB
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (runReaderT, ask, ReaderT)
+import Control.Monad.Reader (MonadIO, MonadReader, runReaderT, ReaderT)
 
 import Control.Lens (Lens', view)
 import System.Process.Typed
@@ -119,23 +120,18 @@ withTmuxSession tcname testfx i =
 -- time.
 sendKeys :: String -> Condition -> ReaderT Env IO String
 sendKeys keys expect = do
-    sessionName <- getSessionName
-    runProcess_ $ proc "tmux" $ communicateSessionArgs sessionName keys False
+    tmuxSendKeys InterpretKeys keys
     waitForCondition expect defaultCountdown
 
 sendLiteralKeys :: String -> ReaderT Env IO String
 sendLiteralKeys keys = do
-    sessionName <- getSessionName
-    runProcess_ $ proc "tmux" $ communicateSessionArgs sessionName keys True
+    tmuxSendKeys LiteralKeys keys
     waitForString keys defaultCountdown
 
 capture :: ReaderT Env IO String
-capture = do
-  sessionname <- getSessionName
-  liftIO $ readProcessWithErrorOutput_ $ proc "tmux" ["capture-pane", "-e", "-p", "-t", sessionname]
-
-getSessionName :: (Monad m) => ReaderT Env m String
-getSessionName = view (envSessionName . ask)
+capture =
+  tmuxSessionProc "capture-pane" ["-e", "-p"]
+  >>= liftIO . readProcessWithErrorOutput_
 
 holdOffTime :: Int
 holdOffTime = 10 ^ (6 :: Int)
@@ -182,13 +178,32 @@ setEnvVarInSession name value = do
   void $ sendLiteralKeys ("export " <> name <> "=" <> value)
   void $ sendKeys "Enter" (Literal name)
 
-communicateSessionArgs
-  :: String -- ^ session name
-  -> String -- ^ keys
-  -> Bool   -- ^ send the keys literally
-  -> [String]
-communicateSessionArgs sessionName keys asLiteral =
-  ["send-keys", "-t", sessionName] <> ["-l" | asLiteral] <> [keys]
+-- | Whether to tell tmux to treat keys literally or interpret
+-- sequences like "Enter" or "C-x".
+--
+data TmuxKeysMode = LiteralKeys | InterpretKeys
+  deriving (Eq)
+
+-- | Run a tmux command via 'runProcess_'.  The session name is read
+-- from the 'MonadReader' environment
+--
+tmuxSendKeys :: (MonadReader Env m, MonadIO m) => TmuxKeysMode -> String -> m ()
+tmuxSendKeys mode keys = tmuxSendKeysProc mode keys >>= runProcess_
+
+-- | Construct the 'ProcessConfig' for a tmux command.  The session
+-- name is read from the 'MonadReader' environment.
+--
+tmuxSendKeysProc :: (MonadReader Env m) => TmuxKeysMode -> String -> m (ProcessConfig () () ())
+tmuxSendKeysProc mode keys = tmuxSessionProc "send-keys" (["-l" | mode == LiteralKeys] <> [keys])
+
+-- | Create a 'ProcessConfig' for a tmux command, taking the session
+-- name from the 'MonadReader' environment.
+--
+tmuxSessionProc :: (MonadReader Env m) => String -> [String] -> m (ProcessConfig () () ())
+tmuxSessionProc cmd args = do
+  sessionName <- view envSessionName
+  pure $ proc "tmux" (cmd : "-t" : sessionName : args)
+
 
 
 type AnsiAttrParam = String
