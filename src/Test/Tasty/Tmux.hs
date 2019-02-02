@@ -26,9 +26,8 @@ import qualified Data.Text.Encoding.Error as T
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Data.Semigroup ((<>))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.STM (atomically)
 import Control.Exception (catch, IOException)
-import System.IO (hPutStr, hPutStrLn, stderr, stdout)
+import System.IO (hPutStr, hPutStrLn, stderr)
 import System.Environment (lookupEnv)
 import Control.Monad (void, when)
 import Data.Maybe (fromMaybe, isJust)
@@ -39,11 +38,8 @@ import Control.Monad.Reader (MonadIO, MonadReader, runReaderT, ReaderT)
 
 import Control.Lens (Getter, Lens', to, view)
 import System.Process.Typed
-       (proc, runProcess_, withProcess_,
-        waitExitCodeSTM, setStdout, getStdout, setStderr, useHandleOpen,
-        byteStringOutput, setStdin, closed, ProcessConfig)
-import System.Directory
-       (getCurrentDirectory, removeDirectoryRecursive)
+       (proc, runProcess_, readProcess_, readProcessInterleaved_,
+        setEnv, ProcessConfig)
 import Test.Tasty (TestTree, TestName, testGroup, withResource)
 import Test.Tasty.HUnit (testCaseSteps, assertBool)
 import Text.Regex.Posix ((=~))
@@ -132,13 +128,15 @@ sendLiteralKeys keys = do
     waitForString keys defaultCountdown
 
 capture :: ReaderT Env IO String
-capture =
-  tmuxSessionProc "capture-pane"
+capture = T.unpack . decodeLenient . LB.toStrict
+  <$> (tmuxSessionProc "capture-pane"
     [ "-e"  -- include escape sequences
     , "-p"  -- send output to stdout
     , "-J"  -- join wrapped lines and preserve trailing whitespace
     ]
-  >>= liftIO . readProcessWithErrorOutput_
+  >>= liftIO . readProcessInterleaved_)
+  where
+    decodeLenient = T.decodeUtf8With T.lenientDecode
 
 initialBackoffMicroseconds :: Int
 initialBackoffMicroseconds = 20 * 10 ^ (3 :: Int)
@@ -248,16 +246,3 @@ buildAnsiRegex attrs fgs bgs =
     choice l r = "(" <> l <> "|" <> r <> ")"
   in
     choice tmux24 tmux25
-
--- | Interleaves stderr with stdout
--- Does not accept STDIN arguments, since we do not need to communicate with the
--- process
-readProcessWithErrorOutput_ :: ProcessConfig stdinClosed stdout stderr -> IO String
-readProcessWithErrorOutput_ pc = do
-  (_, out) <- withProcess_ config $ \p -> atomically $ (,) <$> waitExitCodeSTM p <*> getStdout p
-  pure $ T.unpack $ decodeLenient $ LB.toStrict out
-  where
-    config = setStdout byteStringOutput
-             $ setStderr (useHandleOpen stdout)
-             $ setStdin closed pc
-    decodeLenient = T.decodeUtf8With T.lenientDecode
