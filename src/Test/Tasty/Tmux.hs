@@ -106,13 +106,14 @@ cleanUpTmuxSession sessionname =
 -- | Run all application steps in a session defined by session name.
 withTmuxSession
   :: TestName
-  -> ((String -> IO ()) -> ReaderT Env IO ())
+  -> ((String -> IO ()) -> ReaderT Env IO a)
   -> IO GlobalEnv
   -> Int  -- ^ session sequence number (will be appended to session name)
   -> TestTree
 withTmuxSession tcname testfx gEnv i =
   withResource (setUp gEnv i tcname) tearDown $
-      \env -> testCaseSteps tcname $ \stepfx -> env >>= runReaderT (testfx stepfx)
+      \env -> testCaseSteps tcname $
+        \stepfx -> env >>= runReaderT (void $ testfx stepfx)
 
 -- | Send keys into the program and wait for the condition to be
 -- met, failing the test if the condition is not met after some
