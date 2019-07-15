@@ -51,7 +51,38 @@ data Condition
   | Regex String
   deriving (Show)
 
-type TestCase = IO GlobalEnv -> Int -> TestTree
+-- | A test case that will be executed in a dedicated tmux session.
+-- Parameterised over the "global" environment (c.f. the "session"
+-- environment).
+type TestCase a = IO a -> Int -> TestTree
+
+-- | Run a series of tests in tmux sessions.
+--
+-- Tests are executed sequentially.  Each test case is executed in a
+-- new tmux session.  The name of the session is derived from the
+-- name of the test and prepended with the sequence number.
+--
+-- A session called "keepalive" is created before any test cases are
+-- run, and killed after all the test cases have finished.  This
+-- session ensures that the server remains alive, avoiding some race
+-- conditions.
+--
+testTmux
+  :: IO a
+  -- ^ Set-up action.  Executed one time, after the keepalive
+  -- session is created but before any test cases are executed.
+  -> (a -> IO ())
+  -- ^ Tear-down action.  Executed after all test cases have
+  -- finished but before the keepalive session gets killed.
+  -> [TestCase a]
+  -> TestTree
+testTmux pre post tests =
+  withResource (frameworkPre *> pre) (\a -> post a *> frameworkPost) $ \env ->
+    testGroup "user acceptance tests" $ zipWith ($ env) tests [0..]
+  where
+    keepaliveSessionName = "keepalive"
+    frameworkPre = setUpTmuxSession keepaliveSessionName
+    frameworkPost = cleanUpTmuxSession keepaliveSessionName
 
 assertSubstrInOutput :: String -> String -> ReaderT a IO ()
 assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
@@ -129,9 +160,7 @@ withTmuxSession
   -- ^ The main test function.  The argument is the "step" function
   -- which can be called with a description to label the steps of
   -- the test procedure.
-  -> IO globalEnv
-  -> Int
-  -> TestTree
+  -> TestCase globalEnv
 withTmuxSession pre post desc f getGEnv i =
   withResource
     (getGEnv >>= \gEnv -> frameworkPre >>= pre gEnv)
