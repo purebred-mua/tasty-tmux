@@ -14,35 +14,56 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
+module Test.Tasty.Tmux
+  (
+  -- * Creating tmux test cases
+    testTmux
+  , withTmuxSession
+  , TestCase
 
-module Test.Tasty.Tmux where
+  -- ** Session environment
+  , HasTmuxSession(..)
+  , TmuxSession
 
-import Data.Char (isAscii, isAlphaNum, chr)
+  -- * Captures and assertions
+  , capture
+  , waitForCondition
+  , Condition(..)
+  , defaultRetries
+  , defaultBackoff
+  , buildAnsiRegex
+  , (=~)
+
+  -- * Sending input to a session
+  , sendKeys
+  , sendLiteralKeys
+  , tmuxSendKeys
+  , TmuxKeysMode(..)
+  , setEnvVarInSession
+
+  ) where
+
+import Control.Concurrent (threadDelay)
+import Control.Exception (catch, IOException)
+import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (MonadIO, MonadReader, runReaderT, ReaderT)
+import qualified Data.ByteString.Lazy as L
+import Data.Char (isAscii, isAlphaNum)
+import Data.List (intercalate, isInfixOf)
+import Data.Semigroup ((<>))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
-import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
-import Data.Semigroup ((<>))
-import Control.Concurrent (threadDelay)
-import Control.Exception (catch, IOException)
-import System.IO (hPutStr, hPutStrLn, stderr)
-import System.Environment (lookupEnv)
-import Control.Monad (void, when)
-import Data.Maybe (fromMaybe, isJust)
-import Data.List (intercalate, isInfixOf)
-import qualified Data.ByteString.Lazy as LB
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (MonadIO, MonadReader, runReaderT, ReaderT)
+import System.IO (hPutStrLn, stderr)
 
-import Control.Lens (Getter, Lens', to, view)
+import Control.Lens (Lens', view)
 import System.Process.Typed
-       (proc, runProcess_, readProcess_, readProcessInterleaved_,
-        setEnv, ProcessConfig)
+  ( proc, runProcess_, readProcessInterleaved_, ProcessConfig )
+import Text.Regex.Posix ((=~))
+
 import Test.Tasty (TestTree, TestName, testGroup, withResource)
 import Test.Tasty.HUnit (testCaseSteps, assertBool)
-import Text.Regex.Posix ((=~))
 
 -- | A condition to check for in the output of the program
 data Condition
@@ -55,6 +76,12 @@ data Condition
 -- Parameterised over the "global" environment (c.f. the "session"
 -- environment).
 type TestCase a = IO a -> Int -> TestTree
+
+type TmuxSession = String
+
+class HasTmuxSession a where
+  tmuxSession :: Lens' a TmuxSession
+
 
 -- | Run a series of tests in tmux sessions.
 --
@@ -84,29 +111,184 @@ testTmux pre post tests =
     frameworkPre = setUpTmuxSession keepaliveSessionName
     frameworkPost = cleanUpTmuxSession keepaliveSessionName
 
-assertSubstrInOutput :: String -> String -> ReaderT a IO ()
-assertSubstrInOutput substr out = liftIO $ assertBool (substr <> " not found in\n\n" <> out) $ substr `isInfixOf` out
 
-assertRegex :: String -> String -> ReaderT a IO ()
-assertRegex regex out = liftIO $ assertBool
-  (show regex <> " does not match out\n\n" <> out
-    <> "\n\n raw:\n\n" <> show out)
-  (out =~ regex)
+type AnsiAttrParam = String
+type AnsiFGParam = String
+type AnsiBGParam = String
 
-sessionNamePrefix :: String
-sessionNamePrefix = "purebredtest"
+-- | Generate a regex for an escape sequence setting the given
+-- foreground and background parameters
+--
+-- tmux < 03d01eabb5c5227f56b6b44d04964c1328802628 (first released
+-- in tmux-2.5) ran attributes, foreground colour and background
+-- colour params separated by semicolons (foreground first).
+--
+-- After that commit, attributes, foreground colours and background
+-- colours are written in separate escape sequences.  Therefore for
+-- compatibility with different versions of tmux there are two
+-- patterns to check.
+--
+buildAnsiRegex :: [AnsiAttrParam] -> [AnsiFGParam] -> [AnsiBGParam] -> String
+buildAnsiRegex attrs fgs bgs =
+  let
+    withSemis = intercalate ";"
+    wrap [] = ""
+    wrap xs = "\ESC\\[" <> withSemis xs <> "m"
+    tmux24 = wrap (attrs <> fgs <> bgs)
+    tmux25 = wrap attrs <> wrap fgs <> wrap bgs
+    choice "" "" = ""
+    choice "" r = r
+    choice l "" = l
+    choice l r = "(" <> l <> "|" <> r <> ")"
+  in
+    choice tmux24 tmux25
 
-type TmuxSession = String
+-- | Sets a shell environment variable.
+--
+-- Note: The tmux program provides a command to set environment variables for
+-- running sessions, yet they seem to be not inherited by the shell.
+--
+-- This assumes that a standard shell prompt is ready in the session.
+-- No attempt is made to check this; it just blindly send they keystrokes.
+--
+setEnvVarInSession
+  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
+  => String -> String -> m ()
+setEnvVarInSession name value = do
+  void $ sendLiteralKeys ("export " <> name <> "=" <> value)
+  void $ sendKeys "Enter" (Literal name)
 
-class HasTmuxSession a where
-  tmuxSession :: Lens' a TmuxSession
+-- | Send interpreted keys into the program and wait for the
+-- condition to be met, failing the test if the condition is not met
+-- after some time.
+sendKeys
+  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
+  => String -> Condition -> m String
+sendKeys keys expect = do
+    tmuxSendKeys InterpretKeys keys
+    waitForCondition expect defaultRetries defaultBackoff
 
-instance HasTmuxSession Env where
-  tmuxSession = envSessionName
+-- | Send literal keys into the program and wait for the string to
+-- appear.
+sendLiteralKeys
+  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
+  => String -> m String
+sendLiteralKeys keys = do
+    tmuxSendKeys LiteralKeys keys
+    -- FIXME? change type to allow any condition, matching sendKeys?
+    waitForCondition (Literal keys) defaultRetries defaultBackoff
 
-envSessionName :: Lens' Env String
-envSessionName f (Env a b c d) = fmap (\d' -> Env a b c d') (f d)
-{-# ANN envSessionName ("HLint: ignore Avoid lambda" :: String) #-}
+-- | Whether to tell tmux to treat keys literally or interpret
+-- sequences like "Enter" or "C-x".
+--
+data TmuxKeysMode = LiteralKeys | InterpretKeys
+  deriving (Eq)
+
+-- | Send keystrokes into a tmux session.
+--
+tmuxSendKeys
+  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
+  => TmuxKeysMode -> String -> m ()
+tmuxSendKeys mode keys = tmuxSendKeysProc mode keys >>= runProcess_
+
+-- | Construct the 'ProcessConfig' for a tmux command.  The session
+-- name is read from the 'MonadReader' environment.
+--
+tmuxSendKeysProc
+  :: (HasTmuxSession a, MonadReader a m)
+  => TmuxKeysMode -> String -> m (ProcessConfig () () ())
+tmuxSendKeysProc mode keys = tmuxSessionProc "send-keys" (["-l" | mode == LiteralKeys] <> [keys])
+
+-- | Create a 'ProcessConfig' for a tmux command, taking the session
+-- name from the 'MonadReader' environment.
+--
+tmuxSessionProc
+  :: (HasTmuxSession a, MonadReader a m)
+  => String -> [String] -> m (ProcessConfig () () ())
+tmuxSessionProc cmd args = do
+  sessionName <- view tmuxSession
+  pure $ proc "tmux" (cmd : "-t" : sessionName : args)
+
+-- | Capture the pane and check for a condition, optionally retrying
+-- with exponential backoff.  If the condition is not met after the
+-- final attempt, the test fails.
+waitForCondition
+  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
+  => Condition
+  -> Int  -- ^ Number of retries allowed
+  -> Int  -- ^ Initial microseconds to back off.  Multiplied by 4 on each retry.
+  -> m String  -- ^ Return the successful capture (or throw an exception)
+waitForCondition cond n backOff = do
+  out <- capture >>= checkPane
+  liftIO $ assertBool
+    ( "Wait time exceeded. Condition not met: '" <> show cond
+      <> "' last screen shot:\n\n " <> out <> "\n\n" <> " raw: " <> show out )
+    (checkCondition cond out)
+  pure out
+  where
+    checkPane out
+      | checkCondition cond out = pure out
+      | n <= 0 = pure out
+      | otherwise = do
+          liftIO $ threadDelay backOff
+          waitForCondition cond (n - 1) (backOff * 4)
+
+checkCondition :: Condition -> String -> Bool
+checkCondition Unconditional = const True
+checkCondition (Literal s) = (s `isInfixOf`)
+checkCondition (Regex re) = (=~ re)
+
+-- | 5
+defaultRetries :: Int
+defaultRetries = 5
+
+-- | Run all application steps in a session defined by session name.
+withTmuxSession
+  :: (HasTmuxSession sessionEnv)
+  => (globalEnv -> TmuxSession -> IO sessionEnv)
+  -- ^ Set up session.  The tmux session is established before this
+  -- action is run.  Takes the global environment and Tmux session
+  -- and constructs a session environment value (which must make the
+  -- 'TmuxSession' available via its 'HasTmuxSession' instance).
+  -> (sessionEnv -> IO ())
+  -- ^ Tear down the session.  The tmux session will be torn down
+  -- /after/ this action.
+  -> TestName
+  -- ^ Name of the test (a string).
+  -> ((String -> ReaderT sessionEnv IO ()) -> ReaderT sessionEnv IO a)
+  -- ^ The main test function.  The argument is the "step" function
+  -- which can be called with a description to label the steps of
+  -- the test procedure.
+  -> TestCase globalEnv
+withTmuxSession pre post desc f getGEnv i =
+  withResource
+    (getGEnv >>= \gEnv -> frameworkPre >>= pre gEnv)
+    (\env -> post env *> cleanUpTmuxSession (view tmuxSession env))
+    $ \env -> testCaseSteps desc $
+        \step -> env >>= runReaderT (void $ f (liftIO . step))
+  where
+    frameworkPre =
+      let
+        -- FIXME? customisable session name prefix?
+        sessionName = intercalate "-" ("tasty-tmux" : show i : descWords)
+        descWords = words $ filter (\c -> isAscii c && (isAlphaNum c || c == ' ')) desc
+      in
+        setUpTmuxSession sessionName
+
+capture :: (HasTmuxSession a, MonadReader a m, MonadIO m) => m String
+capture = T.unpack . decodeLenient . L.toStrict
+  <$> (tmuxSessionProc "capture-pane"
+    [ "-e"  -- include escape sequences
+    , "-p"  -- send output to stdout
+    , "-J"  -- join wrapped lines and preserve trailing whitespace
+    ]
+  >>= liftIO . readProcessInterleaved_)
+  where
+    decodeLenient = T.decodeUtf8With T.lenientDecode
+
+-- | 20 milliseconds
+defaultBackoff :: Int
+defaultBackoff = 20 * 10 ^ (3 :: Int)
 
 -- | create a tmux session running in the background
 -- Note: the width and height are the default values tmux uses, but I thought
@@ -142,182 +324,3 @@ cleanUpTmuxSession sessionname =
               do let err = show (e :: IOException)
                  hPutStrLn stderr ("\nException when killing session: " <> err)
                  pure ())
-
--- | Run all application steps in a session defined by session name.
-withTmuxSession
-  :: (HasTmuxSession sessionEnv)
-  => (globalEnv -> TmuxSession -> IO sessionEnv)
-  -- ^ Set up session.  The tmux session is established before this
-  -- action is run.  Takes the global environment and Tmux session
-  -- and constructs a session environment value (which must make the
-  -- 'TmuxSession' available via its 'HasTmuxSession' instance).
-  -> (sessionEnv -> IO ())
-  -- ^ Tear down the session.  The tmux session will be torn down
-  -- /after/ this action.
-  -> TestName
-  -- ^ Name of the test (a string).
-  -> ((String -> ReaderT sessionEnv IO ()) -> ReaderT sessionEnv IO a)
-  -- ^ The main test function.  The argument is the "step" function
-  -- which can be called with a description to label the steps of
-  -- the test procedure.
-  -> TestCase globalEnv
-withTmuxSession pre post desc f getGEnv i =
-  withResource
-    (getGEnv >>= \gEnv -> frameworkPre >>= pre gEnv)
-    (\env -> post env *> cleanUpTmuxSession (view tmuxSession env))
-    $ \env -> testCaseSteps desc $
-        \step -> env >>= runReaderT (void $ f (liftIO . step))
-  where
-    frameworkPre =
-      let
-        sessionName = intercalate "-" (sessionNamePrefix : show i : descWords)
-        descWords = words $ filter (\c -> isAscii c && (isAlphaNum c || c == ' ')) desc
-      in
-        setUpTmuxSession sessionName
-
--- | Send keys into the program and wait for the condition to be
--- met, failing the test if the condition is not met after some
--- time.
-sendKeys
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => String -> Condition -> m String
-sendKeys keys expect = do
-    tmuxSendKeys InterpretKeys keys
-    waitForCondition expect defaultCountdown initialBackoffMicroseconds
-
-sendLiteralKeys
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => String -> m String
-sendLiteralKeys keys = do
-    tmuxSendKeys LiteralKeys keys
-    waitForString keys defaultCountdown
-
-capture :: (HasTmuxSession a, MonadReader a m, MonadIO m) => m String
-capture = T.unpack . decodeLenient . LB.toStrict
-  <$> (tmuxSessionProc "capture-pane"
-    [ "-e"  -- include escape sequences
-    , "-p"  -- send output to stdout
-    , "-J"  -- join wrapped lines and preserve trailing whitespace
-    ]
-  >>= liftIO . readProcessInterleaved_)
-  where
-    decodeLenient = T.decodeUtf8With T.lenientDecode
-
-initialBackoffMicroseconds :: Int
-initialBackoffMicroseconds = 20 * 10 ^ (3 :: Int)
-
--- | wait for the application to render a new interface which we determine with
---   a given condition. We wait a short duration and increase the wait time
---   exponentially until the count down reaches 0. We fail if until then the
---   condition is not met.
-waitForCondition
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => Condition
-  -> Int  -- ^ count down value
-  -> Int  -- ^ milliseconds to back off
-  -> m String
-waitForCondition cond n backOff = do
-  out <- capture >>= checkPane
-  liftIO $ assertBool
-    ( "Wait time exceeded. Condition not met: '" <> show cond
-      <> "' last screen shot:\n\n " <> out <> "\n\n" <> " raw: " <> show out )
-    (checkCondition cond out)
-  pure out
-  where
-    checkPane out
-      | checkCondition cond out = pure out
-      | n <= 0 = pure out
-      | otherwise = do
-          liftIO $ threadDelay backOff
-          waitForCondition cond (n - 1) (backOff * 4)
-
-checkCondition :: Condition -> String -> Bool
-checkCondition Unconditional = const True
-checkCondition (Literal s) = (s `isInfixOf`)
-checkCondition (Regex re) = (=~ re)
-
--- | Convenience version of 'waitForCondition' that checks for a
--- literal string.
---
-waitForString
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => String -> Int -> m String
-waitForString substr n = waitForCondition (Literal substr) n initialBackoffMicroseconds
-
-defaultCountdown :: Int
-defaultCountdown = 5
-
--- | Sets a shell environment variable
--- Note: The tmux program provides a command to set environment variables for
--- running sessions, yet they seem to be not inherited by the shell.
-setEnvVarInSession
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => String -> String -> m ()
-setEnvVarInSession name value = do
-  void $ sendLiteralKeys ("export " <> name <> "=" <> value)
-  void $ sendKeys "Enter" (Literal name)
-
--- | Whether to tell tmux to treat keys literally or interpret
--- sequences like "Enter" or "C-x".
---
-data TmuxKeysMode = LiteralKeys | InterpretKeys
-  deriving (Eq)
-
--- | Run a tmux command via 'runProcess_'.  The session name is read
--- from the 'MonadReader' environment
---
-tmuxSendKeys
-  :: (HasTmuxSession a, MonadReader a m, MonadIO m)
-  => TmuxKeysMode -> String -> m ()
-tmuxSendKeys mode keys = tmuxSendKeysProc mode keys >>= runProcess_
-
--- | Construct the 'ProcessConfig' for a tmux command.  The session
--- name is read from the 'MonadReader' environment.
---
-tmuxSendKeysProc
-  :: (HasTmuxSession a, MonadReader a m)
-  => TmuxKeysMode -> String -> m (ProcessConfig () () ())
-tmuxSendKeysProc mode keys = tmuxSessionProc "send-keys" (["-l" | mode == LiteralKeys] <> [keys])
-
--- | Create a 'ProcessConfig' for a tmux command, taking the session
--- name from the 'MonadReader' environment.
---
-tmuxSessionProc
-  :: (HasTmuxSession a, MonadReader a m)
-  => String -> [String] -> m (ProcessConfig () () ())
-tmuxSessionProc cmd args = do
-  sessionName <- view tmuxSession
-  pure $ proc "tmux" (cmd : "-t" : sessionName : args)
-
-
-
-type AnsiAttrParam = String
-type AnsiFGParam = String
-type AnsiBGParam = String
-
--- | Generate a regex for an escape sequence setting the given
--- foreground and background parameters
---
--- tmux < 03d01eabb5c5227f56b6b44d04964c1328802628 (first released
--- in tmux-2.5) ran attributes, foreground colour and background
--- colour params separated by semicolons (foreground first).
---
--- After that commit, attributes, foreground colours and background
--- colours are written in separate escape sequences.  Therefore for
--- compatibility with different versions of tmux there are two
--- patterns to check.
---
-buildAnsiRegex :: [AnsiAttrParam] -> [AnsiFGParam] -> [AnsiBGParam] -> String
-buildAnsiRegex attrs fgs bgs =
-  let
-    withSemis = intercalate ";"
-    wrap [] = ""
-    wrap xs = "\ESC\\[" <> withSemis xs <> "m"
-    tmux24 = wrap (attrs <> fgs <> bgs)
-    tmux25 = wrap attrs <> wrap fgs <> wrap bgs
-    choice "" "" = ""
-    choice "" r = r
-    choice l "" = l
-    choice l r = "(" <> l <> "|" <> r <> ")"
-  in
-    choice tmux24 tmux25
