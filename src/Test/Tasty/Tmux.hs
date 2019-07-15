@@ -80,8 +80,10 @@ envSessionName f (Env a b c d) = fmap (\d' -> Env a b c d') (f d)
 -- | create a tmux session running in the background
 -- Note: the width and height are the default values tmux uses, but I thought
 -- it's better to be explicit.
-setUpTmuxSession :: String -> IO ()
-setUpTmuxSession sessionname =
+--
+-- Returns the session name (whatever the input was) for convenience.
+setUpTmuxSession :: TmuxSession -> IO TmuxSession
+setUpTmuxSession sessionname = sessionname <$
     catch
         (runProcess_ $ proc
              "tmux"
@@ -118,10 +120,19 @@ withTmuxSession
   -> IO GlobalEnv
   -> Int  -- ^ session sequence number (will be appended to session name)
   -> TestTree
-withTmuxSession tcname testfx gEnv i =
-  withResource (setUp gEnv i tcname) tearDown $
-      \env -> testCaseSteps tcname $
-        \step -> env >>= runReaderT (void $ testfx (liftIO . step))
+withTmuxSession desc f getGEnv i =
+  withResource
+    (getGEnv >>= \gEnv -> frameworkPre >>= setUp gEnv)
+    (\env -> cleanUpTmuxSession (view tmuxSession env) *> tearDown env)
+    $ \env -> testCaseSteps desc $
+        \step -> env >>= runReaderT (void $ f (liftIO . step))
+  where
+    frameworkPre =
+      let
+        sessionName = intercalate "-" (sessionNamePrefix : show i : descWords)
+        descWords = words $ filter (\c -> isAscii c && (isAlphaNum c || c == ' ')) desc
+      in
+        setUpTmuxSession sessionName
 
 -- | Send keys into the program and wait for the condition to be
 -- met, failing the test if the condition is not met after some
