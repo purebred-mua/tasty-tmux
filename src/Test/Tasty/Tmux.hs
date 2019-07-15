@@ -112,18 +112,30 @@ cleanUpTmuxSession sessionname =
                  hPutStrLn stderr ("\nException when killing session: " <> err)
                  pure ())
 
-
 -- | Run all application steps in a session defined by session name.
 withTmuxSession
-  :: TestName
-  -> ((String -> ReaderT Env IO ()) -> ReaderT Env IO a)
-  -> IO GlobalEnv
-  -> Int  -- ^ session sequence number (will be appended to session name)
+  :: (HasTmuxSession sessionEnv)
+  => (globalEnv -> TmuxSession -> IO sessionEnv)
+  -- ^ Set up session.  The tmux session is established before this
+  -- action is run.  Takes the global environment and Tmux session
+  -- and constructs a session environment value (which must make the
+  -- 'TmuxSession' available via its 'HasTmuxSession' instance).
+  -> (sessionEnv -> IO ())
+  -- ^ Tear down the session.  The tmux session will be torn down
+  -- /after/ this action.
+  -> TestName
+  -- ^ Name of the test (a string).
+  -> ((String -> ReaderT sessionEnv IO ()) -> ReaderT sessionEnv IO a)
+  -- ^ The main test function.  The argument is the "step" function
+  -- which can be called with a description to label the steps of
+  -- the test procedure.
+  -> IO globalEnv
+  -> Int
   -> TestTree
-withTmuxSession desc f getGEnv i =
+withTmuxSession pre post desc f getGEnv i =
   withResource
-    (getGEnv >>= \gEnv -> frameworkPre >>= setUp gEnv)
-    (\env -> cleanUpTmuxSession (view tmuxSession env) *> tearDown env)
+    (getGEnv >>= \gEnv -> frameworkPre >>= pre gEnv)
+    (\env -> post env *> cleanUpTmuxSession (view tmuxSession env))
     $ \env -> testCaseSteps desc $
         \step -> env >>= runReaderT (void $ f (liftIO . step))
   where
