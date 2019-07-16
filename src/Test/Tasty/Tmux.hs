@@ -155,7 +155,6 @@ module Test.Tasty.Tmux
 
   -- ** Helper functions
   , buildAnsiRegex
-  , (=~)
 
   -- * Re-exports
   , put
