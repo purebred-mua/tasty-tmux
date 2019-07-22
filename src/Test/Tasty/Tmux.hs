@@ -174,10 +174,11 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (catch, IOException)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (MonadIO, MonadReader, runReaderT)
+import Control.Monad.Reader (MonadIO, MonadReader, asks, runReaderT)
 import Control.Monad.State (MonadState, get, put, runStateT)
 import qualified Data.ByteString.Lazy as L
 import Data.Char (isAscii, isAlphaNum)
+import Data.Functor.Const (Const(..))
 import Data.List (intercalate, isInfixOf)
 import Data.Semigroup ((<>))
 import qualified Data.Text as T
@@ -185,7 +186,6 @@ import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
 import System.IO (hPutStrLn, stderr)
 
-import Control.Lens (Lens', view)
 import System.Process.Typed
   ( proc, runProcess_, readProcessInterleaved_, ProcessConfig )
 import Text.Regex.Posix ((=~))
@@ -223,10 +223,13 @@ type TmuxSession = String
 -- environment types must have an instance of this class.
 class HasTmuxSession a where
   -- | Lens to the 'TmuxSession'
-  tmuxSession :: Lens' a TmuxSession
+  tmuxSession :: Functor f => (TmuxSession -> f TmuxSession) -> a -> f a
 
 instance HasTmuxSession TmuxSession where
   tmuxSession = id
+
+view :: MonadReader s m => ((a -> Const a a) -> s -> Const a s) -> m a
+view l = asks (getConst . l Const)
 
 
 -- | Run a series of tests in tmux sessions.
