@@ -143,6 +143,7 @@ module Test.Tasty.Tmux
   , capture
   , snapshot
   , Capture
+  , captureBytes
   , captureString
 
   -- * Assertions
@@ -176,10 +177,11 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (MonadIO, MonadReader, asks, runReaderT)
 import Control.Monad.State (MonadState, get, put, runStateT)
+import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import Data.Char (isAscii, isAlphaNum)
 import Data.Functor.Const (Const(..))
-import Data.List (intercalate, isInfixOf)
+import Data.List (intercalate)
 import Data.Semigroup ((<>))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -196,21 +198,26 @@ import Test.Tasty.HUnit (assertBool, testCaseSteps)
 -- | A condition to check for in the output of the program
 data Condition
   = Unconditional
-  | Substring String
-  | Regex String
+  | Substring B.ByteString
+  | Regex B.ByteString
   deriving (Show)
 
 -- | A captured pane.  For now this just contains the string content,
 -- but in the future perhaps we will augment it with terminal title,
 -- terminal dimensions, timestamp, etc.
 --
--- Use 'captureString' to get at the string.
+-- Use 'captureBytes' to get the raw terminal output.
 --
-newtype Capture = Capture { _captureString :: String }
+newtype Capture = Capture { _captureBytes :: B.ByteString }
 
--- | Get the captured terminal content.
+-- | Get the captured terminal content as a string (assume UTF-8 encoding),
+-- including escape sequences.
 captureString :: Capture -> String
-captureString = _captureString
+captureString = T.unpack . T.decodeUtf8With T.lenientDecode . _captureBytes
+
+-- | Get the raw bytes of the capture, including escape sequences.
+captureBytes :: Capture -> B.ByteString
+captureBytes = _captureBytes
 
 -- | A test case that will be executed in a dedicated tmux session.
 -- Parameterised over the shared environment type.
@@ -285,7 +292,7 @@ type AnsiBGParam = String
 -- compatibility with different versions of tmux there are two
 -- patterns to check.
 --
-buildAnsiRegex :: [AnsiAttrParam] -> [AnsiFGParam] -> [AnsiBGParam] -> String
+buildAnsiRegex :: [AnsiAttrParam] -> [AnsiFGParam] -> [AnsiBGParam] -> B.ByteString
 buildAnsiRegex attrs fgs bgs =
   let
     withSemis = intercalate ";"
@@ -298,7 +305,7 @@ buildAnsiRegex attrs fgs bgs =
     choice l "" = l
     choice l r = "(" <> l <> "|" <> r <> ")"
   in
-    choice tmux24 tmux25
+    B.pack $ choice tmux24 tmux25
 
 -- | Sets a shell environment variable.
 --
@@ -384,16 +391,16 @@ waitForCondition
   -> m Capture  -- ^ Return the successful capture (or throw an exception)
 waitForCondition cond n backOff = do
   cap <- capture
-  case checkCondition cond (captureString cap) of
+  case checkCondition cond (captureBytes cap) of
     True -> pure cap
     _ | n > 0 -> do
           liftIO $ threadDelay backOff
           waitForCondition cond (n - 1) (backOff * 4)
       | otherwise -> cap <$ assertCondition cond cap
 
-checkCondition :: Condition -> String -> Bool
+checkCondition :: Condition -> B.ByteString -> Bool
 checkCondition Unconditional = const True
-checkCondition (Substring s) = (s `isInfixOf`)
+checkCondition (Substring s) = (s `B.isInfixOf`)
 checkCondition (Regex re) = (=~ re)
 
 -- | Assert that the capture satisfies a condition
@@ -402,15 +409,18 @@ assertCondition cond cap =
   let s = captureString cap
   in liftIO $ assertBool
     ( "Condition not met: '" <> show cond
-    <> "'.  Last capture:\n\n " <> s <> "\n\n" <> " raw: " <> show s )
-    (checkCondition cond s)
+      -- TODO we probably should emit terminal reset sequence
+      -- after outputting the capture.
+      <> "'.  Last capture:\n\n " <> s <> "\n\n"
+      <> " raw: " <> show s )
+    (checkCondition cond (captureBytes cap))
 
 -- | Substring assertion.
-assertSubstring :: (MonadIO m) => String -> Capture -> m ()
+assertSubstring :: (MonadIO m) => B.ByteString -> Capture -> m ()
 assertSubstring = assertCondition . Substring
 
 -- | Regex assertion.
-assertRegex :: (MonadIO m) => String -> Capture -> m ()
+assertRegex :: (MonadIO m) => B.ByteString -> Capture -> m ()
 assertRegex = assertCondition . Regex
 
 -- | Assert that the saved capture satisfies a condition.
@@ -436,11 +446,11 @@ assertConditionS :: (MonadIO m, MonadState Capture m) => Condition -> m ()
 assertConditionS cond = get >>= assertCondition cond
 
 -- | State-aware substring assertion.
-assertSubstringS :: (MonadIO m, MonadState Capture m) => String -> m ()
+assertSubstringS :: (MonadIO m, MonadState Capture m) => B.ByteString -> m ()
 assertSubstringS s = get >>= assertSubstring s
 
 -- | State-aware regex assertion.
-assertRegexS :: (MonadIO m, MonadState Capture m) => String -> m ()
+assertRegexS :: (MonadIO m, MonadState Capture m) => B.ByteString -> m ()
 assertRegexS s = get >>= assertRegex s
 
 -- | 5
@@ -498,15 +508,13 @@ withTmuxSession' = withTmuxSession (const pure) (const $ pure ())
 
 -- | Capture the current terminal state.
 capture :: (HasTmuxSession a, MonadReader a m, MonadIO m) => m Capture
-capture = Capture . T.unpack . decodeLenient . L.toStrict
+capture = Capture . L.toStrict
   <$> (tmuxSessionProc "capture-pane"
     [ "-e"  -- include escape sequences
     , "-p"  -- send output to stdout
     , "-J"  -- join wrapped lines and preserve trailing whitespace
     ]
   >>= liftIO . readProcessInterleaved_)
-  where
-    decodeLenient = T.decodeUtf8With T.lenientDecode
 
 -- | Snapshot the current terminal state.
 --
