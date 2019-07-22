@@ -17,6 +17,8 @@ copyright:           Copyright 2017-2019  Róman Joost and Fraser Tweedale
 category:            Testing
 build-type:          Simple
 cabal-version:       >=1.10
+extra-source-files:
+  README.md
 
 homepage:            https://github.com/purebred-mua/tasty-tmux
 bug-reports:         https://github.com/purebred-mua/tasty-tmux/issues
