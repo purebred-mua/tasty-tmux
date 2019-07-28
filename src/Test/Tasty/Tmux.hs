@@ -62,7 +62,7 @@ after all test cases have run.
 
 @
 test1 :: TestCase SharedEnv
-test1 = withTmuxSession setup teardown "putFile" $ \\step -> do
+test1 = 'withTmuxSession' setup teardown "putFile" $ \\step -> do
   -- test environment is availabe via 'ask'
   TestEnv _ sharedDir testDir <- 'ask'
 
@@ -75,7 +75,7 @@ test1 = withTmuxSession setup teardown "putFile" $ \\step -> do
   'assertRegexS' "The output should match this [Rr]eg[Ee]x"
 
 test2 :: TestCase SharedEnv
-test2 = withTmuxSession setup teardown "checkFile" $ \\step -> do
+test2 = 'withTmuxSession' setup teardown "checkFile" $ \\step -> do
   TestEnv _ sharedDir testDir <- 'ask'
 
   -- use 'step' to label different stages of the test
