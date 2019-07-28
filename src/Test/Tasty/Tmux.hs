@@ -27,7 +27,95 @@ test cases and provides functions for sending input to the tmux
 session and making assertions about the state of the terminal (i.e.
 what is on the screen).
 
-At a glance, the library works like this.  Test cases ('TestCase')
+-}
+module Test.Tasty.Tmux
+  (
+  -- * User guide
+  -- ** Synopsis
+  -- $synopsis
+
+  -- ** Terminal character encoding
+  -- $encoding
+
+  -- * API documentation
+  -- ** Creating test cases
+    testTmux
+  , testTmux'
+  , withTmuxSession
+  , withTmuxSession'
+  , TestCase
+
+  -- *** Test environment
+  , HasTmuxSession(..)
+  , TmuxSession
+
+  -- ** Sending input to a session
+  , sendKeys
+  , sendLiteralKeys
+  , sendLine
+  , tmuxSendKeys
+  , TmuxKeysMode(..)
+  , setEnvVarInSession
+
+  -- ** Capturing terminal state
+  , capture
+  , snapshot
+  , Capture
+  , captureBytes
+  , captureString
+
+  -- ** Assertions
+  , waitForCondition
+  , Condition(..)
+  , defaultRetries
+  , defaultBackoff
+  , assertCondition
+  , assertSubstring
+  , assertRegex
+
+  -- *** State-aware assertions
+  , assertConditionS
+  , assertSubstringS
+  , assertRegexS
+
+  -- *** ANSI escape sequence regex helpers
+  , AnsiAttrParam
+  , AnsiFGParam
+  , AnsiBGParam
+  , buildAnsiRegex
+
+  -- ** Re-exports
+  , put
+
+  ) where
+
+import Control.Concurrent (threadDelay)
+import Control.Exception (catch, IOException)
+import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (MonadIO, MonadReader, asks, runReaderT)
+import Control.Monad.State (MonadState, get, put, runStateT)
+import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy as L
+import Data.Char (isAscii, isAlphaNum)
+import Data.Functor.Const (Const(..))
+import Data.List (intercalate)
+import Data.Semigroup ((<>))
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T
+import System.IO (hPutStrLn, stderr)
+
+import System.Process.Typed
+  ( proc, runProcess_, readProcessInterleaved_, ProcessConfig )
+import Text.Regex.Posix ((=~))
+
+import Test.Tasty (TestTree, TestName, testGroup, withResource)
+import Test.Tasty.HUnit (assertBool, testCaseSteps)
+
+{- $synopsis
+
+Test cases ('TestCase')
 are defined using 'withTmuxSession'.  The 'testTmux' function groups
 test cases into a /Tasty/ 'TestTree'.  Test cases are executed
 sequentially, each in a separate tmux session.  Each test case can
@@ -118,82 +206,23 @@ the 'testTmux'' and 'withTmuxSession'' functions are provided for
 convenience.
 
 -}
-module Test.Tasty.Tmux
-  (
-  -- * Creating test cases
-    testTmux
-  , testTmux'
-  , withTmuxSession
-  , withTmuxSession'
-  , TestCase
 
-  -- ** Test environment
-  , HasTmuxSession(..)
-  , TmuxSession
+{- $encoding
 
-  -- * Sending input to a session
-  , sendKeys
-  , sendLiteralKeys
-  , sendLine
-  , tmuxSendKeys
-  , TmuxKeysMode(..)
-  , setEnvVarInSession
+/tasty-tmux/ does not make any assumptions about terminal
+character encoding.  The only exception is 'captureString'
+which assumes UTF-8 encoding.  All other functions deal with
+'B.ByteString'.
 
-  -- * Capturing terminal state
-  , capture
-  , snapshot
-  , Capture
-  , captureBytes
-  , captureString
+Be careful when using 'OverloadedStrings' - the 'IsString'
+instance for 'B.ByteString' messes up characters > 127.  If
+you need to include high characters in 'String' or 'Regex'
+assertions, encoding them using the expected terminal
+character encoding (you can encode in UTF-8 via
+'Data.Text.Encoding.encodeUtf8').
 
-  -- * Assertions
-  , waitForCondition
-  , Condition(..)
-  , defaultRetries
-  , defaultBackoff
-  , assertCondition
-  , assertSubstring
-  , assertRegex
+-}
 
-  -- ** State-aware assertions
-  , assertConditionS
-  , assertSubstringS
-  , assertRegexS
-
-  -- ** ANSI escape sequence regex helpers
-  , AnsiAttrParam
-  , AnsiFGParam
-  , AnsiBGParam
-  , buildAnsiRegex
-
-  -- * Re-exports
-  , put
-
-  ) where
-
-import Control.Concurrent (threadDelay)
-import Control.Exception (catch, IOException)
-import Control.Monad (void)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (MonadIO, MonadReader, asks, runReaderT)
-import Control.Monad.State (MonadState, get, put, runStateT)
-import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as L
-import Data.Char (isAscii, isAlphaNum)
-import Data.Functor.Const (Const(..))
-import Data.List (intercalate)
-import Data.Semigroup ((<>))
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import qualified Data.Text.Encoding.Error as T
-import System.IO (hPutStrLn, stderr)
-
-import System.Process.Typed
-  ( proc, runProcess_, readProcessInterleaved_, ProcessConfig )
-import Text.Regex.Posix ((=~))
-
-import Test.Tasty (TestTree, TestName, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, testCaseSteps)
 
 -- | A condition to check for in the output of the program
 data Condition
@@ -210,8 +239,11 @@ data Condition
 --
 newtype Capture = Capture { _captureBytes :: B.ByteString }
 
--- | Get the captured terminal content as a string (assume UTF-8 encoding),
--- including escape sequences.
+-- | Get the captured terminal content as a string, including
+-- escape sequences.  Assumes UTF-8 encoding and uses
+-- replacement characters for bad encoding or unknown code
+-- points.
+--
 captureString :: Capture -> String
 captureString = T.unpack . T.decodeUtf8With T.lenientDecode . _captureBytes
 
