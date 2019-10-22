@@ -292,12 +292,13 @@ testTmux
   -> [TestCase a]
   -> TestTree
 testTmux pre post tests =
-  withResource (frameworkPre *> pre) (\a -> post a *> frameworkPost) $ \env ->
-    testGroup "user acceptance tests" $ zipWith ($ env) tests [0..]
+  withResource frameworkPre frameworkPost $ \ioKeepalive ->
+    withResource (ioKeepalive *> pre) post $ \env ->
+      testGroup "user acceptance tests" $ zipWith ($ env) tests [0..]
   where
     keepaliveSessionName = "keepalive"
     frameworkPre = setUpTmuxSession keepaliveSessionName
-    frameworkPost = cleanUpTmuxSession keepaliveSessionName
+    frameworkPost _ = cleanUpTmuxSession keepaliveSessionName
 
 -- | Like 'testTmux' but with no setup or teardown
 testTmux' :: [TestCase ()] -> TestTree
