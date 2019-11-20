@@ -229,6 +229,7 @@ data Condition
   = Unconditional
   | Substring B.ByteString
   | Regex B.ByteString
+  | Not Condition
   deriving (Show)
 
 -- | A captured pane.  For now this just contains the string content,
@@ -435,6 +436,7 @@ checkCondition :: Condition -> B.ByteString -> Bool
 checkCondition Unconditional = const True
 checkCondition (Substring s) = (s `B.isInfixOf`)
 checkCondition (Regex re) = (=~ re)
+checkCondition (Not cond) = not . checkCondition cond
 
 -- | Assert that the capture satisfies a condition
 assertCondition :: (MonadIO m) => Condition -> Capture -> m ()
