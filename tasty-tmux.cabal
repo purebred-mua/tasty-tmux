@@ -1,5 +1,5 @@
 name:                tasty-tmux
-version:             0.1.0.4
+version:             0.1.0.5
 synopsis:            Terminal user acceptance testing (UAT) via tmux
 
 description:
