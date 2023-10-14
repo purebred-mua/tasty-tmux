@@ -38,7 +38,7 @@ library
   build-depends:
     base >=4.11 && <5
     , mtl >=2.2 && <2.4
-    , bytestring >=0.10 && <0.12
+    , bytestring >=0.10 && <0.13
     , text >=1.2 && <3
     , typed-process >=0.2.4 && <0.3
     , regex-posix >= 0.95
