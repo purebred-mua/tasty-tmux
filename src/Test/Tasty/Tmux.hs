@@ -100,7 +100,6 @@ import qualified Data.ByteString.Lazy as L
 import Data.Char (isAscii, isAlphaNum)
 import Data.Functor.Const (Const(..))
 import Data.List (intercalate)
-import Data.Semigroup ((<>))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
