@@ -1,3 +1,8 @@
+## 0.1.0.5
+
+* Use `regex-pcre` instead of `regex-posix` as the latter is not able
+  to match unicode characters.
+
 ## 0.1.0.4 (2022-09-27)
 
 * Support `text-2.0`

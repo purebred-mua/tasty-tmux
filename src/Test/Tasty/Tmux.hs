@@ -107,7 +107,7 @@ import System.IO (hPutStrLn, stderr)
 
 import System.Process.Typed
   ( proc, runProcess_, readProcessInterleaved_, ProcessConfig )
-import Text.Regex.Posix ((=~))
+import Text.Regex.PCRE ((=~))
 
 import Test.Tasty (TestTree, TestName, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCaseSteps)
